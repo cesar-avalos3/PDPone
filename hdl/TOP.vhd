@@ -4,7 +4,12 @@ use ieee.numeric_std.ALL;
 
 entity TOP is
     port( clk, rst: in std_logic;
-          led: out std_logic_vector(0 to 3));
+          led: out std_logic_vector(0 to 3);
+          VGA_HS_O : out  STD_LOGIC;
+          VGA_VS_O : out  STD_LOGIC;
+          VGA_R : out  STD_LOGIC_VECTOR (3 downto 0);
+          VGA_B : out  STD_LOGIC_VECTOR (3 downto 0);
+          VGA_G : out  STD_LOGIC_VECTOR (3 downto 0));
 end TOP;
 
 
@@ -18,17 +23,18 @@ component ALU is
      ac_next, io_next, cy_next: out std_logic_vector(0 to 17));
 end component;
 
+component VGA is
+      port(CLK_I : in  STD_LOGIC;
+           x, y: in natural;
+           VGA_HS_O : out  STD_LOGIC;
+           VGA_VS_O : out  STD_LOGIC;
+           VGA_R : out  STD_LOGIC_VECTOR (3 downto 0);
+           VGA_B : out  STD_LOGIC_VECTOR (3 downto 0);
+           VGA_G : out  STD_LOGIC_VECTOR (3 downto 0));
+end component;
+
 signal ac, io, cy, instruction, ac_reg, ac_alu, io_reg, cy_reg, result: std_logic_vector(0 to 17);
 signal overflow, skip: std_logic;
-
-signal STACK: std_logic_vector(0 to 17) := (others => '0');
-signal PC: natural := 0;
--- It's gonna be 4096 Words of 18-bits each
-type INST_MEM is array(0 to 200) of std_logic_vector(0 to 17); --Around 4K of working memory
-signal instruction_memory : INST_MEM := (0 => "111000000000000010", 1 => "100000000000000000", 2 => "110111101000000001", others => "100000000000000000");
--- It's gonna be 4096 Words of 18-bits each
-type WORK_MEM is array(0 to 133) of std_logic_vector(0 to 17);
-signal work_memory : WORK_MEM := (0 => "000000000000000001", others => (others => '0'));
 
 type STATE is (RESET, RUNNING_LOW, RUNNING_HIGH, WAITAMINUTE, INDIRECT);
 signal current_state : STATE := RESET;
@@ -38,13 +44,18 @@ signal ac_reg_toggle,deposit_toggle,io_reg_toggle : std_logic := '0';
 alias opcode : std_logic_vector(0 to 4) is instruction(0 to 4);
 alias indirect_bit : std_logic is instruction(5);
 alias shift_amount: std_logic_vector(0 to 8) is instruction(9 to 17);
---alias memory_location: std_logic_vector(0 to 11) is instruction(6 to 17);
+alias iot_memory_address: std_logic_vector(0 to 5) is instruction(12 to 17);
+alias iot_wait: std_logic_vector(0 to 1) is instruction(5 to 6);
+alias iot_control: std_logic_vector(0 to 4) is instruction(7 to 11);
+
 
 signal shift_amount_integer: std_logic_vector(0 to 8) := (others => '0');
 signal memory_location : std_logic_vector(0 to 11);
 signal deposit_mask : std_logic_vector(0 to 17);
 
 signal shift_reg_ac, shift_reg_io : std_logic_vector(0 to 17);
+
+signal x, y: natural;
 
 subtype opcode_t is std_logic_vector(0 to 4); 
 signal verbose_opcode : opcode_t;
@@ -83,17 +94,40 @@ constant load_ac_n              : opcode_t := "11100"; -- Let N be the memory ad
 constant shift_group            : opcode_t := "11011";
 
 
+-- Extended Instructions
+constant iot                    : opcode_t := "11101";
+
+-- IOT Addresses
+subtype address_iot is std_logic_vector(0 to 5);
+constant iot_display_screen: address_iot := "000111"; -- 7
+
+signal STACK: std_logic_vector(0 to 17) := (others => '0');
+signal PC: natural := 0;
+-- It's gonna be 4096 Words of 18-bits each
+type INST_MEM is array(0 to 200) of std_logic_vector(0 to 17); --Around 4K of working memory
+signal instruction_memory : INST_MEM := (0 => load_ac_n  & '0' & 12x"1", 
+                                         1 => deposit_ac & '0' & 12x"0", 
+                                         2 => load_ac_n  & '0' & 12x"9",
+                                         3 => add        & '0' & 12x"0",
+                                         4 => iot        & 7x"0" & iot_display_screen,
+                                         5 => jump       & '0' & 12x"3",
+                                         others => "100000000000000000");
+-- It's gonna be 4096 Words of 18-bits each
+type WORK_MEM is array(0 to 133) of std_logic_vector(0 to 17);
+signal work_memory : WORK_MEM := (0 => "000000000000000001", others => (others => '0'));
 
 begin
 
 ALU_I: ALU port map( clk => clk, rst => rst, ac => ac, io => io, cy => cy, operation => opcode, 
                      overflow => overflow, skip => skip, ac_next => ac_alu, io_next => io_reg, cy_next => cy_reg);
 
+VGA_I: VGA port map(clk_i => clk, x => x, y => y, VGA_HS_O => VGA_HS_O, VGA_VS_O => VGA_VS_O, VGA_R => VGA_R, VGA_G => VGA_G, VGA_B => VGA_B);
+
 verbose_opcode <= opcode;
 
 memory_location <= instruction(6 to 17);
 
-ac_reg_toggle <= '1' when opcode = "11100" else '0';
+ac_reg_toggle <= '1' when opcode = "10000" else '0';
 ac_reg <= "000000" & memory_location when opcode = "11100" else "000000" & not memory_location when opcode = "11011" else ac_reg;
 
 deposit_mask <= "111111111111111111" when opcode = deposit_ac else
@@ -233,7 +267,7 @@ process(clk, rst)
                         when deposit_zero =>
                             work_memory(to_integer(unsigned(memory_location))) <= (others => '0');
                         when execute =>
-                            instruction <= work_memory(to_integer(unsigned(memory_location))); 
+                            instruction <= instruction_memory(to_integer(unsigned(memory_location))); 
                         when jump =>
                             PC <= to_integer(unsigned(memory_location)); 
                         when jump_and_save_pc =>
@@ -263,6 +297,16 @@ process(clk, rst)
                         when shift_group =>
                             ac <= shift_reg_ac;
                             io <= shift_reg_io;
+                        when iot =>
+                            case iot_memory_address is
+                                when iot_display_screen => --DPY
+                                    -- Draw onto screen, bits 0 to 9 of AC is the X coordinates (signed)
+                                    --                   bits 0 to 9 of IO is the Y coordinates (signed)
+                                    --x <= to_integer(signed(ac(0 to 9))) + 513;
+                                    x <= to_integer(signed(ac(8 to 17))) + 513;
+                                    y <= to_integer(signed(ac(0 to 9))) + 513;
+                                when others =>                      
+                            end case;
                         when others =>
                     end case;
                     
