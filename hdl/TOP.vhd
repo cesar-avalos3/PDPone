@@ -24,13 +24,23 @@ component ALU is
 end component;
 
 component VGA is
-      port(CLK_I : in  STD_LOGIC;
+      port(CLK_I,pxl_clk: in  STD_LOGIC;
            x, y: in natural;
+           write_to_VRAM: in std_logic;
            VGA_HS_O : out  STD_LOGIC;
            VGA_VS_O : out  STD_LOGIC;
            VGA_R : out  STD_LOGIC_VECTOR (3 downto 0);
            VGA_B : out  STD_LOGIC_VECTOR (3 downto 0);
            VGA_G : out  STD_LOGIC_VECTOR (3 downto 0));
+end component;
+
+component clk_wiz_0
+port
+ (-- Clock in ports
+  CLK_IN1           : in     std_logic;
+  -- Clock out ports
+  CLK_OUT1          : out    std_logic
+ );
 end component;
 
 signal ac, io, cy, instruction, ac_reg, ac_alu, io_reg, cy_reg, result: std_logic_vector(0 to 17);
@@ -59,6 +69,7 @@ signal x, y: natural;
 
 subtype opcode_t is std_logic_vector(0 to 4); 
 signal verbose_opcode : opcode_t;
+
 -- Opcodes
 -- Arithmetic Instructions
 constant Add            : opcode_t := "10000"; -- ac = cy + ac
@@ -94,6 +105,32 @@ constant load_ac_n              : opcode_t := "11100"; -- Let N be the memory ad
 constant shift_group            : opcode_t := "11011";
 
 
+-- 11010          1/0           000000000010
+-- Opcode   If 1 eq is false    
+-- Skip Instructions
+constant skip_group             : opcode_t := "11010";
+
+subtype skip_address is std_logic_vector(0 to 11);
+constant skip_on_zero_ac        : skip_address := 12o"0100";
+constant skip_on_plus_ac        : skip_address := 12o"0200";
+constant skip_on_mins_ac        : skip_address := 12o"0400";
+constant skip_on_zero_overflow  : skip_address := 12o"1000";
+constant skip_on_plus_io        : skip_address := 12o"2000";
+constant skip_on_zero_switch_1  : skip_address := 12o"0010";
+constant skip_on_zero_switch_2  : skip_address := 12o"0020";
+constant skip_on_zero_switch_3  : skip_address := 12o"0030";
+constant skip_on_zero_switch_4  : skip_address := 12o"0040";
+constant skip_on_zero_switch_5  : skip_address := 12o"0050";
+constant skip_on_zero_switch_6  : skip_address := 12o"0060";
+constant skip_on_zero_switch_7  : skip_address := 12o"0070";
+constant skip_on_zero_pflag_1   : skip_address := 12o"0001";
+constant skip_on_zero_pflag_2   : skip_address := 12o"0002";
+constant skip_on_zero_pflag_3   : skip_address := 12o"0003";
+constant skip_on_zero_pflag_4   : skip_address := 12o"0004";
+constant skip_on_zero_pflag_5   : skip_address := 12o"0005";
+constant skip_on_zero_pflag_6   : skip_address := 12o"0006";
+constant skip_on_zero_pflag_7   : skip_address := 12o"0007";
+
 -- Extended Instructions
 constant iot                    : opcode_t := "11101";
 
@@ -103,31 +140,56 @@ constant iot_display_screen: address_iot := "000111"; -- 7
 
 signal STACK: std_logic_vector(0 to 17) := (others => '0');
 signal PC: natural := 0;
+signal write_to_VRAM: std_logic := '0';
+signal arithmetic_unit_in_use: std_logic := '0';
 -- It's gonna be 4096 Words of 18-bits each
-type INST_MEM is array(0 to 200) of std_logic_vector(0 to 17); --Around 4K of working memory
-signal instruction_memory : INST_MEM := (0 => load_ac_n  & '0' & 12x"1", 
-                                         1 => deposit_ac & '0' & 12x"0", 
-                                         2 => load_ac_n  & '0' & 12x"9",
-                                         3 => add        & '0' & 12x"0",
-                                         4 => iot        & 7x"0" & iot_display_screen,
-                                         5 => jump       & '0' & 12x"3",
+type INST_MEM is array(0 to 50) of std_logic_vector(0 to 17); --Around 4K of working memory
+signal instruction_memory : INST_MEM := (0 => load_ac_n         & '0'   & 12x"1", 
+                                         1 => deposit_ac        & '0'   & 12x"0",
+                                         2 => load_ac_n         & '0'   & 12x"3C", -- Width of the box
+                                         3 => deposit_ac        & '0'   & 12x"5", -- Memory Location 5 will hold the width of the box
+                                         4 => load_ac_n         & '0'   & 12x"10",
+                                         5 => deposit_ac        & '0'   & 12x"1",  -- Memory Location 1 will hold the value of io
+                                         6 => load_io           & '0'   & 12x"1",
+                                         7 => load_ac_n         & '0'   & 12x"10", -- Outer Loop starts here
+                                         8 => iot               & 7x"0" & iot_display_screen,
+                                         9 => add               & '0'   & 12x"0",
+                                        10 => skip_if_ac_eq_y   & '0'   & 12x"5",
+                                        11 => jump              & '0'   & 12x"8",
+                                        12 => load_ac           & '0'   & 12x"1",
+                                        13 => add               & '0'   & 12x"0",  -- Add 1 to io
+                                        14 => skip_if_ac_neq_y  & '0'   & 12x"5",
+                                        15 => jump              & '0'   & 12x"0",
+                                        16 => deposit_ac        & '0'   & 12x"1",  -- Store AC to M[1]
+                                        17 => load_io           & '0'   & 12x"1",  -- IO = M[1]
+                                        18 => jump              & '0'   & 12x"7",
                                          others => "100000000000000000");
 -- It's gonna be 4096 Words of 18-bits each
-type WORK_MEM is array(0 to 133) of std_logic_vector(0 to 17);
+type WORK_MEM is array(0 to 102) of std_logic_vector(0 to 17);
 signal work_memory : WORK_MEM := (0 => "000000000000000001", others => (others => '0'));
-
+signal pxl_clk: std_logic;
 begin
 
 ALU_I: ALU port map( clk => clk, rst => rst, ac => ac, io => io, cy => cy, operation => opcode, 
                      overflow => overflow, skip => skip, ac_next => ac_alu, io_next => io_reg, cy_next => cy_reg);
 
-VGA_I: VGA port map(clk_i => clk, x => x, y => y, VGA_HS_O => VGA_HS_O, VGA_VS_O => VGA_VS_O, VGA_R => VGA_R, VGA_G => VGA_G, VGA_B => VGA_B);
+VGA_I: VGA port map(clk_i => clk,pxl_clk => pxl_clk, x => x, y => y, write_to_VRAM => write_to_VRAM, VGA_HS_O => VGA_HS_O, VGA_VS_O => VGA_VS_O, VGA_R => VGA_R, VGA_G => VGA_G, VGA_B => VGA_B);
+
+
+
+clk_div_inst : clk_wiz_0
+  port map
+   (-- Clock in ports
+    CLK_IN1 => clk,
+    -- Clock out ports
+    CLK_OUT1 => pxl_clk);
+
 
 verbose_opcode <= opcode;
-
+arithmetic_unit_in_use <= '1' when opcode = Add or opcode =  Subtract or opcode = Multiply_Step or opcode = Divide_Step or opcode = Index or opcode = Index_and_Skip or opcode = and_i or opcode =  eor_i or opcode = xor_i else '0';
 memory_location <= instruction(6 to 17);
 
-ac_reg_toggle <= '1' when opcode = "10000" else '0';
+ac_reg_toggle <= '1' when arithmetic_unit_in_use = '1' else '0';
 ac_reg <= "000000" & memory_location when opcode = "11100" else "000000" & not memory_location when opcode = "11011" else ac_reg;
 
 deposit_mask <= "111111111111111111" when opcode = deposit_ac else
@@ -139,7 +201,7 @@ io_reg_toggle <= '1' when opcode = "01001" else '0';
 
 cy <= work_memory(to_integer(unsigned(memory_location))) when ac_reg_toggle = '1' else cy;
 
--- One's adder
+-- Ones adder
 process(shift_amount) 
     variable temp_reg: unsigned(0 to 8);
     begin
@@ -152,27 +214,8 @@ process(shift_amount)
     shift_amount_integer <= std_logic_vector(temp_reg);
 end process;
 
----- Instruction Decoder
---process(instruction) begin
---    case opcode begin
---        -- Arithmetic Instructions
---        when Add =>
---
---        when Subtract =>
---
---        when Multiply_Step =>
---        
---        when Divide_Step =>
---        
---        when Index =>
---        
---        when Index_and_Skip =>
---
---    end case;
---end process;
-
 -- Shifter
-process(instruction) 
+process(instruction,ac, io) 
     variable rot_temp : std_logic_vector(0 to 35);
     begin
     shift_reg_ac <= ac;
@@ -251,6 +294,7 @@ process(clk, rst)
                     -- Add pc immediately
                     PC <= PC + 1;
                 when RUNNING_LOW =>
+                    write_to_VRAM <= '0';
                     case opcode is
                         when Add | Subtract | Multiply_Step | Divide_Step | Index | Index_and_Skip | and_i | eor_i | xor_i =>
                             ac <= ac_alu;
@@ -303,9 +347,18 @@ process(clk, rst)
                                     -- Draw onto screen, bits 0 to 9 of AC is the X coordinates (signed)
                                     --                   bits 0 to 9 of IO is the Y coordinates (signed)
                                     --x <= to_integer(signed(ac(0 to 9))) + 513;
-                                    x <= to_integer(signed(ac(8 to 17))) + 513;
-                                    y <= to_integer(signed(ac(0 to 9))) + 513;
+                                    x <= to_integer(signed(ac(8 to 17))) + 513; -- For testing purposes we'll be using the lower 8 to 17 bits
+                                    y <= to_integer(signed(io(8 to 17))) + 513;
+                                    write_to_VRAM <= '1';
                                 when others =>                      
+                            end case;
+                        when skip_group =>
+                            case memory_location is
+                                when skip_on_plus_io =>
+                                    if(signed(io) > 1) then -- Need to account for the 1's complement issue
+                                        PC <= PC + 1;
+                                    end if;
+                                when others =>
                             end case;
                         when others =>
                     end case;
@@ -313,6 +366,7 @@ process(clk, rst)
                     current_state <= RUNNING_HIGH;
                 when RUNNING_HIGH =>
                  current_state <= RESET;
+                 write_to_VRAM <= '0';
 
                  -- Shifts
                  

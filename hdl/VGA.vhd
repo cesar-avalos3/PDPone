@@ -14,10 +14,12 @@
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.std_logic_unsigned.all;
+use IEEE.numeric_std.all;
 
 entity vga is
-    Port ( CLK_I : in  STD_LOGIC;
+    Port ( CLK_I, pxl_clk : in  STD_LOGIC;
            x, y: in natural;
+           write_to_VRAM: in std_logic;
            VGA_HS_O : out  STD_LOGIC;
            VGA_VS_O : out  STD_LOGIC;
            VGA_R : out  STD_LOGIC_VECTOR (3 downto 0);
@@ -27,13 +29,15 @@ end vga;
 
 architecture Behavioral of vga is
 
-component clk_wiz_0
-port
- (-- Clock in ports
-  CLK_IN1           : in     std_logic;
-  -- Clock out ports
-  CLK_OUT1          : out    std_logic
- );
+
+
+component blk_mem_gen_0
+port(addra,addrb: in std_logic_vector(19 downto 0);
+     clka: in std_logic;
+     dina: in std_logic_vector(0 downto 0);
+     doutb: out std_logic_vector(0 downto 0);
+     wea: in std_logic_vector(0 downto 0);
+     enb, clkb: in std_logic);
 end component;
 
 --Sync Generation constants
@@ -112,8 +116,9 @@ constant BOX_Y_MIN : natural := 256;
 constant BOX_X_INIT : std_logic_vector(11 downto 0) := x"000";
 constant BOX_Y_INIT : std_logic_vector(11 downto 0) := x"190"; --400
 
-signal pxl_clk : std_logic;
 signal active : std_logic;
+
+signal h, v: natural := 0;
 
 signal h_cntr_reg : std_logic_vector(11 downto 0) := (others =>'0');
 signal v_cntr_reg : std_logic_vector(11 downto 0) := (others =>'0');
@@ -141,40 +146,35 @@ signal box_cntr_reg : std_logic_vector(24 downto 0) := (others =>'0');
 signal update_box : std_logic;
 signal pixel_in_box : std_logic;
 
-type vid_buffer is array(0 to 1280, 0 to 1023) of std_logic;
+type vid_buffer is array(0 to 30, 0 to 30) of std_logic;
 signal video_buffer : vid_buffer := (others => (others => '0'));
 
+signal video_buffer_out: std_logic;
 
+signal addra, addrb: std_logic_vector(19 downto 0);
+signal clka: std_logic;
+signal dina, doutb: std_logic_vector(0 downto 0);
+signal wea: std_logic_vector(0 downto 0);
 begin
-  
-   
-clk_div_inst : clk_wiz_0
-  port map
-   (-- Clock in ports
-    CLK_IN1 => CLK_I,
-    -- Clock out ports
-    CLK_OUT1 => pxl_clk);
 
-  
+video_ram: blk_mem_gen_0 port map(addra => addra, addrb => addrb, clka => clk_i, dina => dina, doutb => doutb, wea(0) => write_to_VRAM, enb => '1', clkb=>pxl_clk);
+
+-- Port A is the WRITE port
+-- Port B is the READ port
+addra <= std_logic_vector(to_unsigned(y * 1024 + x, addra'length));
   ----------------------------------------------------
   -------         TEST PATTERN LOGIC           -------
   ----------------------------------------------------
-  vga_red   <= video_buffer(x,y) & video_buffer(x,y) & video_buffer(x,y) & video_buffer(x,y) when (active = '1') else (others => '0');
+  --vga_red   <=  video_buffer(x,y) &  video_buffer(x,y) &  video_buffer(x,y) & video_buffer(x,y) when (active = '1') else (others => '0');
                 
-  vga_blue  <= "00" & video_buffer(x,y) & video_buffer(x,y) when (active = '1') else (others => '0');
+  --vga_blue  <= "00" & video_buffer(x,y) & video_buffer(x,y) when (active = '1') else (others => '0');
               
-  vga_green <= "000" & video_buffer(x,y) when (active = '1') else (others => '0');
+  --vga_green <= "000" & video_buffer(x,y) when (active = '1') else (others => '0');
               
  ------------------------------------------------------
  -------         SYNC GENERATION                 ------
  ------------------------------------------------------
- 
-  process(x,y) 
-  begin
-   -- if(active = '0') then
-    video_buffer(x,y) <= not video_buffer(x,y);
-    --end if;
-  end process;
+dina(0) <= '1';
  
   process (pxl_clk)
   begin
@@ -222,8 +222,29 @@ clk_div_inst : clk_wiz_0
   end process;
   
   
-  active <= '1' when ((h_cntr_reg < FRAME_WIDTH) and (v_cntr_reg < FRAME_HEIGHT))else
+active <= '1' when ((h_cntr_reg < FRAME_WIDTH) and (v_cntr_reg < FRAME_HEIGHT))else
             '0';
+
+h <= to_integer(unsigned(h_cntr_reg));
+v <= to_integer(unsigned(v_cntr_reg));
+
+addrb <= std_logic_vector( to_unsigned(h + v * 1024, addrb'length)) when active = '1' else (others => '0');  
+  
+  -- Read the pixels at X,Y
+  process (pxl_clk) 
+  begin
+    if(rising_edge(pxl_clk)) then
+        if(h_cntr_reg < 1024) AND (active = '1') then
+            vga_red <= doutb(0) & "000";
+            vga_blue <= doutb(0) & doutb(0) & "00";
+            vga_green <= doutb(0) & "000";
+        else
+            vga_red <= (others => '0');
+            vga_blue <= (others => '0');
+            vga_green <= (others => '0');
+        end if;
+    end if;
+  end process;
 
   process (pxl_clk)
   begin
