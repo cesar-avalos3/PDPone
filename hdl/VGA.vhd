@@ -17,9 +17,10 @@ use IEEE.std_logic_unsigned.all;
 use IEEE.numeric_std.all;
 
 entity vga is
-    Port ( CLK_I, pxl_clk : in  STD_LOGIC;
+    Port ( CLK_I, pxl_clk, rst: in  STD_LOGIC;
            x, y: in natural;
            write_to_VRAM: in std_logic;
+           wait_for_clear: out STD_LOGIC;
            VGA_HS_O : out  STD_LOGIC;
            VGA_VS_O : out  STD_LOGIC;
            VGA_R : out  STD_LOGIC_VECTOR (3 downto 0);
@@ -153,15 +154,26 @@ signal video_buffer_out: std_logic;
 
 signal addra, addrb: std_logic_vector(19 downto 0);
 signal clka: std_logic;
-signal dina, doutb: std_logic_vector(0 downto 0);
+signal dina, doutb, dina_switch: std_logic_vector(0 downto 0);
 signal wea: std_logic_vector(0 downto 0);
+signal wea_counter: integer := 0;
+signal addra_switch, addra_blank : std_logic_vector(19 downto 0);
+signal clear_frame : std_logic := '0';
+
+
+-- Every MAX_FRAME_COUNTER frames, we will clear the framebuffer
+-- This is an artistic license take on the TYPE-30 CRT Monitor
+signal frame_counter: integer := 0;
+constant MAX_FRAME_COUNTER : integer := 60;
+
 begin
 
-video_ram: blk_mem_gen_0 port map(addra => addra, addrb => addrb, clka => clk_i, dina => dina, doutb => doutb, wea(0) => write_to_VRAM, enb => '1', clkb=>pxl_clk);
+video_ram: blk_mem_gen_0 port map(addra => addra_switch, addrb => addrb, clka => pxl_clk, dina => dina_switch, doutb => doutb, wea => wea, enb => '1', clkb=>pxl_clk);
 
 -- Port A is the WRITE port
 -- Port B is the READ port
 addra <= std_logic_vector(to_unsigned(y * 1024 + x, addra'length));
+
   ----------------------------------------------------
   -------         TEST PATTERN LOGIC           -------
   ----------------------------------------------------
@@ -175,7 +187,45 @@ addra <= std_logic_vector(to_unsigned(y * 1024 + x, addra'length));
  -------         SYNC GENERATION                 ------
  ------------------------------------------------------
 dina(0) <= '1';
- 
+
+
+addra_switch <= addra when clear_frame = '0' else addra_blank;
+dina_switch  <= dina  when clear_frame = '0' else (others => '0');
+wait_for_clear <= clear_frame;
+
+  process (pxl_clk, write_to_VRAM) 
+    begin
+    if(rising_edge(pxl_clk)) then
+      if( (write_to_VRAM = '1')) then
+        wea_counter <= wea_counter + 1;
+      else
+        wea_counter <= 0;
+      end if;
+    end if;  
+  end process;
+
+  process (pxl_clk,wea_counter, clear_frame)
+  variable v_ram_counter: integer := 0;
+    begin
+    if(rising_edge(pxl_clk)) then
+      if(clear_frame = '1') then
+        wea(0) <= '1';
+        addra_blank <= std_logic_vector(to_unsigned(v_ram_counter, addra_blank'length));
+        if(v_ram_counter < 1048575) then
+          v_ram_counter := v_ram_counter + 1;
+        else
+          v_ram_counter := 0;
+        end if;
+      elsif(wea_counter = 1) then
+        v_ram_counter := 0;
+        wea(0) <= '1';
+      else
+        v_ram_counter := 0;
+        wea(0) <= '0';
+      end if;
+    end if;  
+  end process;
+
   process (pxl_clk)
   begin
     if (rising_edge(pxl_clk)) then
@@ -222,8 +272,24 @@ dina(0) <= '1';
   end process;
   
   
-active <= '1' when ((h_cntr_reg < FRAME_WIDTH) and (v_cntr_reg < FRAME_HEIGHT))else
+active <= '1' when ((h_cntr_reg < FRAME_WIDTH) and (v_cntr_reg < FRAME_HEIGHT)) else
             '0';
+
+process(pxl_clk, v_cntr_reg) begin
+    if(rising_edge(pxl_clk)) then
+        if(v_cntr_reg = (V_FP + FRAME_HEIGHT + V_PW - 2)) then
+            if(frame_counter = MAX_FRAME_COUNTER) then
+                frame_counter <= 0;
+                clear_frame <= '1';
+            else
+                frame_counter <= frame_counter + 1;
+                clear_frame <= '0';    
+            end if;
+        end if;
+    end if;
+end process;
+
+--clear_frame <= not(clear_frame) when (v_cntr_reg = (V_FP + FRAME_HEIGHT + V_PW - 2)) else '0' when rst = '1'; 
 
 h <= to_integer(unsigned(h_cntr_reg));
 v <= to_integer(unsigned(v_cntr_reg));
@@ -231,20 +297,9 @@ v <= to_integer(unsigned(v_cntr_reg));
 addrb <= std_logic_vector( to_unsigned(h + v * 1024, addrb'length)) when active = '1' else (others => '0');  
   
   -- Read the pixels at X,Y
-  process (pxl_clk) 
-  begin
-    if(rising_edge(pxl_clk)) then
-        if(h_cntr_reg < 1024) AND (active = '1') then
-            vga_red <= doutb(0) & "000";
-            vga_blue <= doutb(0) & doutb(0) & "00";
-            vga_green <= doutb(0) & "000";
-        else
-            vga_red <= (others => '0');
-            vga_blue <= (others => '0');
-            vga_green <= (others => '0');
-        end if;
-    end if;
-  end process;
+vga_red   <= doutb(0) & "000"           when (active = '1' and (h_cntr_reg < 1024) and (v_cntr_reg < 1024)) else (others => '0');
+vga_blue  <= doutb(0) & doutb(0) & "00" when (active = '1' and (h_cntr_reg < 1024) and (v_cntr_reg < 1024)) else (others => '0');
+vga_green <= doutb(0) & "000"           when (active = '1' and (h_cntr_reg < 1024) and (v_cntr_reg < 1024)) else (others => '0');
 
   process (pxl_clk)
   begin

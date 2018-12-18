@@ -3,8 +3,9 @@ use ieee.std_logic_1164.ALL;
 use ieee.numeric_std.ALL;
 
 entity TOP is
-    port( clk, rst: in std_logic;
+    port( clk, rst, btn: in std_logic;
           led: out std_logic_vector(0 to 3);
+          rgb_led: out std_logic_vector(5 downto 0);
           VGA_HS_O : out  STD_LOGIC;
           VGA_VS_O : out  STD_LOGIC;
           VGA_R : out  STD_LOGIC_VECTOR (3 downto 0);
@@ -24,9 +25,10 @@ component ALU is
 end component;
 
 component VGA is
-      port(CLK_I,pxl_clk: in  STD_LOGIC;
+      port(CLK_I,pxl_clk, rst: in  STD_LOGIC;
            x, y: in natural;
            write_to_VRAM: in std_logic;
+           wait_for_clear: out std_logic;
            VGA_HS_O : out  STD_LOGIC;
            VGA_VS_O : out  STD_LOGIC;
            VGA_R : out  STD_LOGIC_VECTOR (3 downto 0);
@@ -134,9 +136,34 @@ constant skip_on_zero_pflag_7   : skip_address := 12o"0007";
 -- Extended Instructions
 constant iot                    : opcode_t := "11101";
 
+constant operate_group          : opcode_t := "11111";
+subtype address_operate is std_logic_vector(0 to 11);
+constant clear_io               : address_operate := 12o"4000";
+constant load_ac_from_test      : address_operate := 12o"2000";
+constant load_ac_with_pc        : address_operate := 12o"0100";
+constant complement_ac          : address_operate := 12o"1000";
+constant halt                   : address_operate := 12o"0400";
+constant clear_ac               : address_operate := 12o"0200";
+constant clear_pflag_1          : address_operate := 12o"0001";
+constant clear_pflag_2          : address_operate := 12o"0002";
+constant clear_pflag_3          : address_operate := 12o"0003";
+constant clear_pflag_4          : address_operate := 12o"0004";
+constant clear_pflag_5          : address_operate := 12o"0005";
+constant clear_pflag_6          : address_operate := 12o"0006";
+constant clear_pflag_7          : address_operate := 12o"0007";
+constant set_pflag_1            : address_operate := 12o"0011";
+constant set_pflag_2            : address_operate := 12o"0012";
+constant set_pflag_3            : address_operate := 12o"0013";
+constant set_pflag_4            : address_operate := 12o"0014";
+constant set_pflag_5            : address_operate := 12o"0015";
+constant set_pflag_6            : address_operate := 12o"0016";
+constant set_pflag_7            : address_operate := 12o"0017";
+constant nop                    : address_operate := 12o"0000";
+
 -- IOT Addresses
 subtype address_iot is std_logic_vector(0 to 5);
-constant iot_display_screen: address_iot := "000111"; -- 7
+constant iot_display_screen: address_iot  := "000111"; -- 7
+constant iot_display_rgb_led: address_iot := "000011";
 
 signal STACK: std_logic_vector(0 to 17) := (others => '0');
 signal PC: natural := 0;
@@ -159,7 +186,7 @@ signal instruction_memory : INST_MEM := (0 => load_ac_n         & '0'   & 12x"1"
                                         12 => load_ac           & '0'   & 12x"1",
                                         13 => add               & '0'   & 12x"0",  -- Add 1 to io
                                         14 => skip_if_ac_neq_y  & '0'   & 12x"5",
-                                        15 => jump              & '0'   & 12x"0",
+                                        15 => jump              & '0'   & 12d"0",
                                         16 => deposit_ac        & '0'   & 12x"1",  -- Store AC to M[1]
                                         17 => load_io           & '0'   & 12x"1",  -- IO = M[1]
                                         18 => jump              & '0'   & 12x"7",
@@ -167,13 +194,13 @@ signal instruction_memory : INST_MEM := (0 => load_ac_n         & '0'   & 12x"1"
 -- It's gonna be 4096 Words of 18-bits each
 type WORK_MEM is array(0 to 102) of std_logic_vector(0 to 17);
 signal work_memory : WORK_MEM := (0 => "000000000000000001", others => (others => '0'));
-signal pxl_clk: std_logic;
+signal pxl_clk,wait_for_clear: std_logic;
 begin
 
 ALU_I: ALU port map( clk => clk, rst => rst, ac => ac, io => io, cy => cy, operation => opcode, 
                      overflow => overflow, skip => skip, ac_next => ac_alu, io_next => io_reg, cy_next => cy_reg);
 
-VGA_I: VGA port map(clk_i => clk,pxl_clk => pxl_clk, x => x, y => y, write_to_VRAM => write_to_VRAM, VGA_HS_O => VGA_HS_O, VGA_VS_O => VGA_VS_O, VGA_R => VGA_R, VGA_G => VGA_G, VGA_B => VGA_B);
+VGA_I: VGA port map(clk_i => clk,pxl_clk => pxl_clk,rst =>rst, wait_for_clear => wait_for_clear,x => x, y => y, write_to_VRAM => write_to_VRAM, VGA_HS_O => VGA_HS_O, VGA_VS_O => VGA_VS_O, VGA_R => VGA_R, VGA_G => VGA_G, VGA_B => VGA_B);
 
 
 
@@ -280,6 +307,9 @@ process(clk, rst)
         if(rst = '1') then
             ac <= (others => '0');
             io <= (others => '0');
+            PC <= 0;
+            x  <= 0;
+            y  <= 0;
           --  ac_reg <= (others => '0');
             --memory <= (others => (others => '0'));
             current_state <= RESET;
@@ -341,15 +371,34 @@ process(clk, rst)
                         when shift_group =>
                             ac <= shift_reg_ac;
                             io <= shift_reg_io;
+                        when operate_group =>
+                            case memory_location is
+                                when clear_ac =>
+                                    ac <= (others => '0');
+                                when complement_ac =>
+                                    ac <= not ac;
+                                when clear_io =>
+                                    io <= ( others => '0');
+                                when load_ac_with_pc =>
+                                    ac <= std_logic_vector(to_unsigned(PC, ac'length));
+                                when others =>
+                            end case;
                         when iot =>
                             case iot_memory_address is
                                 when iot_display_screen => --DPY
                                     -- Draw onto screen, bits 0 to 9 of AC is the X coordinates (signed)
                                     --                   bits 0 to 9 of IO is the Y coordinates (signed)
                                     --x <= to_integer(signed(ac(0 to 9))) + 513;
-                                    x <= to_integer(signed(ac(8 to 17))) + 513; -- For testing purposes we'll be using the lower 8 to 17 bits
-                                    y <= to_integer(signed(io(8 to 17))) + 513;
-                                    write_to_VRAM <= '1';
+                                    if(wait_for_clear = '0') then
+                                        x <= to_integer(signed(ac(8 to 17))) + 513; -- For testing purposes we'll be using the lower 8 to 17 bits
+                                        y <= to_integer(signed(io(8 to 17))) + 513;
+                                        write_to_VRAM <= '1';
+                                    else
+                                        current_state <= RUNNING_LOW;
+                                    end if;
+                                when iot_display_rgb_led =>
+                                    rgb_led(2 downto 0) <= ac(17) & ac(16) & ac(15);
+                                    rgb_led(5 downto 3) <= io(17) & io(16) & io(15);
                                 when others =>                      
                             end case;
                         when skip_group =>
@@ -365,7 +414,9 @@ process(clk, rst)
                     
                     current_state <= RUNNING_HIGH;
                 when RUNNING_HIGH =>
-                 current_state <= RESET;
+                 if(btn = '1') then
+                    current_state <= RESET;
+                 end if;
                  write_to_VRAM <= '0';
 
                  -- Shifts
@@ -377,5 +428,5 @@ process(clk, rst)
     end if;
     
 end process;
-
+    led <= std_logic_vector(to_unsigned(PC, led'length));
 end RTL;
