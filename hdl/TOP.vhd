@@ -3,7 +3,8 @@ use ieee.std_logic_1164.ALL;
 use ieee.numeric_std.ALL;
 
 entity TOP is
-    port( clk, rst, btn: in std_logic;
+    port( clk, rst: in std_logic;
+          btns: in std_logic_vector(0 to 3);
           led: out std_logic_vector(0 to 3);
           rgb_led: out std_logic_vector(5 downto 0);
           VGA_HS_O : out  STD_LOGIC;
@@ -48,7 +49,10 @@ end component;
 signal ac, io, cy, instruction, ac_reg, ac_alu, io_reg, cy_reg, result: std_logic_vector(0 to 17);
 signal overflow, skip: std_logic;
 
-type STATE is (RESET, RUNNING_LOW, RUNNING_HIGH, WAITAMINUTE, INDIRECT);
+alias btn : std_logic is btns(0);
+alias keys: std_logic_vector(0 to 2) is btns(1 to 3);
+
+type STATE is (RESET, RUNNING_LOW, RUNNING_HIGH, WAITFORINPUT, INDIRECT);
 signal current_state : STATE := RESET;
 
 signal ac_reg_toggle,deposit_toggle,io_reg_toggle : std_logic := '0';
@@ -163,12 +167,13 @@ constant nop                    : address_operate := 12o"0000";
 -- IOT Addresses
 subtype address_iot is std_logic_vector(0 to 5);
 constant iot_display_screen: address_iot  := "000111"; -- 7
-constant iot_display_rgb_led: address_iot := "000011";
+constant iot_display_rgb_led: address_iot := "000011"; -- Custom display LED function
 
 signal STACK: std_logic_vector(0 to 17) := (others => '0');
 signal PC: natural := 0;
 signal write_to_VRAM: std_logic := '0';
 signal arithmetic_unit_in_use: std_logic := '0';
+signal completion_pulse : std_logic := '0';
 -- It's gonna be 4096 Words of 18-bits each
 type INST_MEM is array(0 to 50) of std_logic_vector(0 to 17); --Around 4K of working memory
 signal instruction_memory : INST_MEM := (0 => load_ac_n         & '0'   & 12x"1", 
@@ -212,6 +217,9 @@ clk_div_inst : clk_wiz_0
     CLK_OUT1 => pxl_clk);
 
 
+
+-- ## TODO ## --
+-- Clean up the source muxes
 verbose_opcode <= opcode;
 arithmetic_unit_in_use <= '1' when opcode = Add or opcode =  Subtract or opcode = Multiply_Step or opcode = Divide_Step or opcode = Index or opcode = Index_and_Skip or opcode = and_i or opcode =  eor_i or opcode = xor_i else '0';
 memory_location <= instruction(6 to 17);
@@ -226,9 +234,22 @@ deposit_mask <= "111111111111111111" when opcode = deposit_ac else
 
 io_reg_toggle <= '1' when opcode = "01001" else '0';
 
+
+-- Handling the single button press now
+
+process(clk) begin
+    if(rising_edge(clk)) then
+            completion_pulse <= '0';
+        if(current_state = WAITFORINPUT and (key(0) = '1' or key(1) = '1' or key(2) = '1')) then
+            completion_pulse <= '1';
+        end if;
+    end if;
+end process;
+
 cy <= work_memory(to_integer(unsigned(memory_location))) when ac_reg_toggle = '1' else cy;
 
--- Ones adder
+-- Add the amount of 1's in the shift field
+-- Used in shift functions
 process(shift_amount) 
     variable temp_reg: unsigned(0 to 8);
     begin
@@ -325,6 +346,7 @@ process(clk, rst)
                     PC <= PC + 1;
                 when RUNNING_LOW =>
                     write_to_VRAM <= '0';
+                    current_state <= RUNNING_HIGH;
                     case opcode is
                         when Add | Subtract | Multiply_Step | Divide_Step | Index | Index_and_Skip | and_i | eor_i | xor_i =>
                             ac <= ac_alu;
@@ -384,6 +406,9 @@ process(clk, rst)
                                 when others =>
                             end case;
                         when iot =>
+                            if(iot_wait = "01") then
+                                current_state <= WAITFORINPUT;
+                            end if;
                             case iot_memory_address is
                                 when iot_display_screen => --DPY
                                     -- Draw onto screen, bits 0 to 9 of AC is the X coordinates (signed)
@@ -403,24 +428,43 @@ process(clk, rst)
                             end case;
                         when skip_group =>
                             case memory_location is
+                                when skip_on_zero_ac =>
+                                    if( (unsigned(ac) = 0) or (ac = "1000000000000000000") ) then
+                                        PC <= PC + 1;
+                                    end if;
+                                when skip_on_plus_ac =>
+                                    if(signed(ac) > 1) then -- Need to account for the 1's complement issue
+                                        PC <= PC + 1;
+                                    end if;
+                                when skip_on_mins_ac =>
+                                    if(signed(io) < 0) then
+                                        PC <= PC + 1;
+                                    end if;
+                                when skip_on_zero_overflow =>
+                                    if(overflow = '1' ) then
+                                        PC <= PC + 1;    
+                                    end if;
                                 when skip_on_plus_io =>
                                     if(signed(io) > 1) then -- Need to account for the 1's complement issue
                                         PC <= PC + 1;
                                     end if;
+                                -- The rest of the switches and programflags
                                 when others =>
                             end case;
                         when others =>
                     end case;
                     
-                    current_state <= RUNNING_HIGH;
                 when RUNNING_HIGH =>
                  if(btn = '1') then
                     current_state <= RESET;
                  end if;
                  write_to_VRAM <= '0';
-
                  -- Shifts
-                 
+                when WAITFORINPUT =>
+                    -- Need to figure out how to handle this
+                    if(completion_pulse = '1') then
+                        current_state <= RUNNING_HIGH;
+                    end if;
                 when OTHERS =>
                     current_state <= RESET;
             end case;
