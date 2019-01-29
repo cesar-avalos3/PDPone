@@ -46,13 +46,13 @@ port
  );
 end component;
 
-signal ac, io, cy, instruction, ac_reg, ac_alu, io_reg, cy_reg, result: std_logic_vector(0 to 17);
+signal ac, io, cy, instruction, ac_reg, ac_alu, io_reg, cy_reg, result, indirect_register: std_logic_vector(0 to 17);
 signal overflow, skip: std_logic;
 
 alias btn : std_logic is btns(0);
 alias keys: std_logic_vector(0 to 2) is btns(1 to 3);
 
-type STATE is (RESET, RUNNING_LOW, RUNNING_HIGH, WAITFORINPUT, INDIRECT);
+type STATE is (RESET, RUNNING_LOW, RUNNING_HIGH, WAITFORINPUT, INDIRECT_FETCH, INDIRECT_DONE);
 signal current_state : STATE := RESET;
 
 signal ac_reg_toggle,deposit_toggle,io_reg_toggle : std_logic := '0';
@@ -168,6 +168,7 @@ constant nop                    : address_operate := 12o"0000";
 subtype address_iot is std_logic_vector(0 to 5);
 constant iot_display_screen: address_iot  := "000111"; -- 7
 constant iot_display_rgb_led: address_iot := "000011"; -- Custom display LED function
+constant iot_get_key_down: address_iot    := "000001";
 
 signal STACK: std_logic_vector(0 to 17) := (others => '0');
 signal PC: natural := 0;
@@ -176,25 +177,41 @@ signal arithmetic_unit_in_use: std_logic := '0';
 signal completion_pulse : std_logic := '0';
 -- It's gonna be 4096 Words of 18-bits each
 type INST_MEM is array(0 to 50) of std_logic_vector(0 to 17); --Around 4K of working memory
-signal instruction_memory : INST_MEM := (0 => load_ac_n         & '0'   & 12x"1", 
-                                         1 => deposit_ac        & '0'   & 12x"0",
-                                         2 => load_ac_n         & '0'   & 12x"3C", -- Width of the box
-                                         3 => deposit_ac        & '0'   & 12x"5", -- Memory Location 5 will hold the width of the box
-                                         4 => load_ac_n         & '0'   & 12x"10",
-                                         5 => deposit_ac        & '0'   & 12x"1",  -- Memory Location 1 will hold the value of io
-                                         6 => load_io           & '0'   & 12x"1",
-                                         7 => load_ac_n         & '0'   & 12x"10", -- Outer Loop starts here
-                                         8 => iot               & 7x"0" & iot_display_screen,
-                                         9 => add               & '0'   & 12x"0",
-                                        10 => skip_if_ac_eq_y   & '0'   & 12x"5",
-                                        11 => jump              & '0'   & 12x"8",
-                                        12 => load_ac           & '0'   & 12x"1",
+signal instruction_memory : INST_MEM := (0 => load_ac_n         & '0'   & 12x"1",  -- ac = 1
+                                         1 => deposit_ac        & '0'   & 12x"0",  -- m[0] = 1
+                                         2 => load_ac_n         & '0'   & 12x"3C", -- ac = width of the box
+                                         3 => deposit_ac        & '0'   & 12x"5",  -- m[5] = width of the box
+                                         4 => load_ac_n         & '0'   & 12x"10", -- ac = 10
+                                         5 => deposit_ac        & '0'   & 12x"1",  -- m[1] = 10 -> io = 10
+                                         6 => load_io           & '0'   & 12x"1",  -- io = 1
+                                         -- Outer loop starts here
+                                         7 => load_ac           & '0'   & 12x"10", -- ac = m[10]
+                                         8 => iot               & 7x"0" & iot_display_screen, -- Render Screen
+                                         9 => add               & '0'   & 12x"0",  -- ac += m[0] -> ac++
+                                        10 => skip_if_ac_eq_y   & '0'   & 12x"5",  -- if(ac == m[5]) skip jump
+                                        11 => jump              & '0'   & 12x"8",  -- goto Render Screen
+                                        12 => load_ac           & '0'   & 12x"1",  -- ac = m[1] = io
                                         13 => add               & '0'   & 12x"0",  -- Add 1 to io
-                                        14 => skip_if_ac_neq_y  & '0'   & 12x"5",
-                                        15 => jump              & '0'   & 12d"0",
-                                        16 => deposit_ac        & '0'   & 12x"1",  -- Store AC to M[1]
-                                        17 => load_io           & '0'   & 12x"1",  -- IO = M[1]
-                                        18 => jump              & '0'   & 12x"7",
+                                        14 => skip_if_ac_neq_y  & '0'   & 12x"5",  -- if(io != m[5]) skip jump , if(ac != 5)
+                                        15 => jump              & '0'   & 12d"19",  -- if(io == m[5]) then restart from 0
+                                        16 => deposit_ac        & '0'   & 12x"1",  -- m[1] = ac = io
+                                        17 => load_io           & '0'   & 12x"1",  -- io = m[1]
+                                        18 => jump              & '0'   & 12x"7",  -- jump back to Render Screen
+                                        -- Handle control once things are drawn
+                                        19 => iot               & 7x"0" & iot_get_key_down,
+                                        20 => deposit_ac        & '0'   & 12x"3",  -- m[3] = ac
+                                        21 => deposit_io        & '0'   & 12x"4",  -- m[4] = status of button 2, 1 is down 0 is up
+                                        22 => load_ac           & '0'   & 12x"4",
+                                        23 => skip_if_ac_eq_y   & '0'   & 12x"0",  -- if ac == 1 then skip the following instruction
+                                        24 => jump              & '0'   & 12x"4",
+                                        25 => load_ac_n         & '0'   & 12x"5",  -- ac = 5
+                                        26 => add               & '0'   & 12x"5",  -- ac = width + 5
+                                        27 => deposit_ac        & '0'   & 12x"5",  -- width = width + 5
+                                        28 => load_ac_n         & '0'   & 12x"5",
+                                        29 => add               & '0'   & 12x"10",
+                                        30 => deposit_ac        & '0'   & 12x"10",
+                                        31 => load_ac           & '0'   & 12x"3",  -- restore ac to whatever it was before we ran this function
+                                        32 => jump              & '0'   & 12x"4",
                                          others => "100000000000000000");
 -- It's gonna be 4096 Words of 18-bits each
 type WORK_MEM is array(0 to 102) of std_logic_vector(0 to 17);
@@ -240,7 +257,7 @@ io_reg_toggle <= '1' when opcode = "01001" else '0';
 process(clk) begin
     if(rising_edge(clk)) then
             completion_pulse <= '0';
-        if(current_state = WAITFORINPUT and (key(0) = '1' or key(1) = '1' or key(2) = '1')) then
+        if(current_state = WAITFORINPUT and (keys(0) = '1' or keys(1) = '1' or keys(2) = '1')) then
             completion_pulse <= '1';
         end if;
     end if;
@@ -349,7 +366,12 @@ process(clk, rst)
                     current_state <= RUNNING_HIGH;
                     case opcode is
                         when Add | Subtract | Multiply_Step | Divide_Step | Index | Index_and_Skip | and_i | eor_i | xor_i =>
-                            ac <= ac_alu;
+                            if(indirect_bit = '1') then
+                                current_state <= INDIRECT_FETCH;
+                                indirect_register <= instruction;
+                            else
+                                ac <= ac_alu;
+                            end if;
                         when load_ac =>
                             ac <= work_memory(to_integer(unsigned(memory_location)));
                         when deposit_ac =>
@@ -424,6 +446,12 @@ process(clk, rst)
                                 when iot_display_rgb_led =>
                                     rgb_led(2 downto 0) <= ac(17) & ac(16) & ac(15);
                                     rgb_led(5 downto 3) <= io(17) & io(16) & io(15);
+                                when iot_get_key_down =>
+                                    if(btns(2) = '1') then
+                                        io <= (17 => '1', others => '0');
+                                    else
+                                        io <= (others => '0');
+                                    end if;
                                 when others =>                      
                             end case;
                         when skip_group =>
@@ -455,7 +483,7 @@ process(clk, rst)
                     end case;
                     
                 when RUNNING_HIGH =>
-                 if(btn = '1') then
+                 if(btn = '1' or btns(3) = '1') then
                     current_state <= RESET;
                  end if;
                  write_to_VRAM <= '0';
@@ -464,6 +492,16 @@ process(clk, rst)
                     -- Need to figure out how to handle this
                     if(completion_pulse = '1') then
                         current_state <= RUNNING_HIGH;
+                    end if;
+                when INDIRECT_FETCH =>
+                    indirect_register <= work_memory(to_integer(unsigned(indirect_register(6 to 17))));
+                    current_state <= INDIRECT_DONE;
+                when INDIRECT_DONE =>
+                    if(indirect_register(5) = '0') then
+                        current_state <= RUNNING_LOW;
+                        instruction(5 to 17) <= '0' & indirect_register(6 to 17);
+                    else
+                        current_state <= INDIRECT_FETCH;
                     end if;
                 when OTHERS =>
                     current_state <= RESET;
